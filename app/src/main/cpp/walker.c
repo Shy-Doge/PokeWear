@@ -299,6 +299,7 @@ void setAccelerometer(int8_t x, int8_t y, int8_t z) {
     // Reset the buffer state to ensure clean reads
     accel.buffer.state = ACCEL_GETTING_ADDRESS;
     accel.buffer.offset = 0x0;
+
 }
 
 void runSubClock(){
@@ -2622,13 +2623,34 @@ int runNextInstruction(uint64_t* cycleCount){
                                 accel.buffer.state = ACCEL_GETTING_BYTES;
                                 *SSU.SSSR = *SSU.SSSR | RDRF;
                             }break;
-                            case ACCEL_GETTING_BYTES:{
+                            /*case ACCEL_GETTING_BYTES:{
                                 *SSU.SSRDR = accel.memory[(accel.buffer.address) + accel.buffer.offset];
                                 accel.buffer.offset += 1;
                                 *SSU.SSSR = *SSU.SSSR | RDRF;
                                 *SSU.SSSR = *SSU.SSSR | TDRE;
                                 *SSU.SSSR = *SSU.SSSR | TEND;
-                            }break;
+                            }break;*/
+                            case ACCEL_GETTING_BYTES: {
+                                // Provide accelerometer data based on the address
+                                switch (accel.buffer.address) {
+                                    case 0x1: // X-axis
+                                        *SSU.SSRDR = accel.memory[1];
+                                        break;
+                                    case 0x2: // Y-axis
+                                        *SSU.SSRDR = accel.memory[2];
+                                        break;
+                                    case 0x3: // Z-axis
+                                        *SSU.SSRDR = accel.memory[3];
+                                        break;
+                                    default:
+                                        *SSU.SSRDR = 0x00; // Default value
+                                        break;
+                                }
+                                accel.buffer.offset += 1;
+                                *SSU.SSSR = *SSU.SSSR | RDRF; // Set RDRF flag
+                                *SSU.SSSR = *SSU.SSSR | TDRE; // Set Transmit Data Register Empty flag
+                                *SSU.SSSR = *SSU.SSSR | TEND; // Set Transfer End flag
+                            } break;
                         }
                     }
                         // EEPROM

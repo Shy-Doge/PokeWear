@@ -16,34 +16,44 @@ import kotlin.concurrent.thread
 
 class WalkerView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
 
+    /* I am pretty sure pulling this fast isnt what the actual device does lmao
+    I should probably limit this to like 25hz or whatever pulling rate it actually uses
+    for now, I have no clue what it is so I am keeping it like this, plus, it worked
+    like 1 out of 100 times on the android studio emulator lol */
+
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
     private val sensorListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
-            val gravity = 9.81f  // Convert m/s² to g
-            val scale = 512f     // BMA150 10-bit signed resolution for ±2g
+            //Log.d("SensorTiming", "Sensor timestamp: ${event.timestamp} | X: ${event.values[0]}, Y: ${event.values[1]}, Z: ${event.values[2]}")
 
-            // Convert to g (gravitational units)
+            val gravity = 9.81f // Earth's gravity in m/s²
+            val scale = 512f    // BMA150 10-bit resolution, ±2g = ±512
+
+            // Convert Android values (in m/s²) to g
             val x_g = event.values[0] / gravity
             val y_g = event.values[1] / gravity
             val z_g = event.values[2] / gravity
 
-            // Convert to raw BMA150-like values (10-bit)
-            // I assume it should be like that reading online
-            val x_raw = (x_g * scale).toInt()
-            val y_raw = (y_g * scale).toInt()
-            val z_raw = (z_g * scale).toInt()
+            // Convert to BMA150 raw 10-bit signed values
+            val x_raw = (x_g * scale).toInt().coerceIn(-512, 511)
+            val y_raw = (y_g * scale).toInt().coerceIn(-512, 511)
+            val z_raw = (z_g * scale).toInt().coerceIn(-512, 511)
 
-            // Clamp to byte range and send to native code
-            NativeBridge.setAccelerometer(
-                x_raw.coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte(),
-                y_raw.coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte(),
-                z_raw.coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
-            )
+            // If NativeBridge only accepts 8-bit, scale down proportionally
+            val x_byte = (x_raw / 4).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
+            val y_byte = (y_raw / 4).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
+            val z_byte = (z_raw / 4).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
+
+            NativeBridge.setAccelerometer(x_byte, y_byte, z_byte)
+
+            // Log the raw data with timestamp
+            //Log.d("AccelerometerData", " | X: $x_raw, Y: $y_raw, Z: $z_raw")
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
+
 
     private var backgroundBitmap: Bitmap? = null
 
@@ -103,18 +113,29 @@ class WalkerView(context: Context) : SurfaceView(context), SurfaceHolder.Callbac
             Log.e("WalkerView", "Failed to load background.png", e)
         }
 
-        NativeBridge.init(assetManager, nativeWidth, nativeHeight)
-
-        running = true
-        startGameLoop()
+        // ✅ FIRST: Set up the sensor listener
         sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
         accelerometer?.let {
-            sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_GAME)
+            sensorManager.registerListener(
+                sensorListener,
+                accelerometer,
+                SensorManager.SENSOR_DELAY_FASTEST/*,
+                0 // maxReportLatencyUs = 0 disables batching, I am pretty sure it
+                worked once with this and again without it, I think the problem is
+                inside the walker.c */
+            )
+
         }
 
+        // ✅ THEN: Call into native code
+        NativeBridge.init(assetManager, nativeWidth, nativeHeight)
+
+        running = true
+        startGameLoop()
     }
+
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         running = false
