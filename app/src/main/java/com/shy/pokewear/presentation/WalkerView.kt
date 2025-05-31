@@ -3,57 +3,14 @@ package com.shy.pokewear.presentation
 import android.content.Context
 import android.content.res.AssetManager
 import android.graphics.*
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.MotionEvent
-import java.nio.ByteBuffer
 import kotlin.concurrent.thread
+import com.shy.pokewear.engine.EmulatorEngine
 
 class WalkerView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
-
-    /* I am pretty sure pulling this fast isnt what the actual device does lmao
-    I should probably limit this to like 25hz or whatever pulling rate it actually uses
-    for now, I have no clue what it is so I am keeping it like this, plus, it worked
-    like 1 out of 100 times on the android studio emulator lol */
-
-    private lateinit var sensorManager: SensorManager
-    private var accelerometer: Sensor? = null
-    private val sensorListener = object : SensorEventListener {
-        override fun onSensorChanged(event: SensorEvent) {
-            //Log.d("SensorTiming", "Sensor timestamp: ${event.timestamp} | X: ${event.values[0]}, Y: ${event.values[1]}, Z: ${event.values[2]}")
-
-            val gravity = 9.81f // Earth's gravity in m/s²
-            val scale = 512f    // BMA150 10-bit resolution, ±2g = ±512
-
-            // Convert Android values (in m/s²) to g
-            val x_g = event.values[0] / gravity
-            val y_g = event.values[1] / gravity
-            val z_g = event.values[2] / gravity
-
-            // Convert to BMA150 raw 10-bit signed values
-            val x_raw = (x_g * scale).toInt().coerceIn(-512, 511)
-            val y_raw = (y_g * scale).toInt().coerceIn(-512, 511)
-            val z_raw = (z_g * scale).toInt().coerceIn(-512, 511)
-
-            // If NativeBridge only accepts 8-bit, scale down proportionally
-            val x_byte = (x_raw / 4).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
-            val y_byte = (y_raw / 4).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
-            val z_byte = (z_raw / 4).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
-
-            NativeBridge.setAccelerometer(x_byte, y_byte, z_byte)
-
-            // Log the raw data with timestamp
-            //Log.d("AccelerometerData", " | X: $x_raw, Y: $y_raw, Z: $z_raw")
-        }
-
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-    }
-
 
     private var backgroundBitmap: Bitmap? = null
 
@@ -80,9 +37,9 @@ class WalkerView(context: Context) : SurfaceView(context), SurfaceHolder.Callbac
     )
 
     private val buttons = listOf(
-        CircleButton("◀\uFE0F", 0b00000100),
+        CircleButton(" ", 0b00000100),
         CircleButton(" ", 0b00000001),
-        CircleButton("▶\uFE0F", 0b00010000)
+        CircleButton(" ", 0b00010000)
     )
 
     private val buttonPaint = Paint().apply {
@@ -113,42 +70,22 @@ class WalkerView(context: Context) : SurfaceView(context), SurfaceHolder.Callbac
             Log.e("WalkerView", "Failed to load background.png", e)
         }
 
-        // ✅ FIRST: Set up the sensor listener
-        sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        EmulatorEngine.init(context)
 
-        accelerometer?.let {
-            sensorManager.registerListener(
-                sensorListener,
-                accelerometer,
-                SensorManager.SENSOR_DELAY_FASTEST/*,
-                0 // maxReportLatencyUs = 0 disables batching, I am pretty sure it
-                worked once with this and again without it, I think the problem is
-                inside the walker.c */
-            )
-
+        post {
+            EmulatorEngine.start(context)
+            start()
         }
-
-        // ✅ THEN: Call into native code
-        NativeBridge.init(assetManager, nativeWidth, nativeHeight)
-
-        running = true
-        startGameLoop()
     }
-
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         running = false
-        sensorManager.unregisterListener(sensorListener)
+        EmulatorEngine.shutdown()
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
 
     private fun startGameLoop() {
-        // I am sorry, I know this looks really bad but this was to get the emulator working
-        // before making it look good and I just kept adding stuff...
-        // BUT HEY, IT WORKS (badly...)
-
         thread(start = true) {
             val targetFps = 4
             val tickIntervalMs = 1000L / targetFps
@@ -156,25 +93,21 @@ class WalkerView(context: Context) : SurfaceView(context), SurfaceHolder.Callbac
             while (running) {
                 val startTime = System.currentTimeMillis()
 
-                if (!NativeBridge.step()) {
-                    running = false
-                    break
-                }
+                val currentFrameBitmap = EmulatorEngine.getCurrentFrame()
 
-                val currentFrameBitmap = NativeBridge.getFrame(nativeWidth, nativeHeight)
-                //Log.d("WalkerView", "Frame is null: ${currentFrameBitmap == null}")
+                val canvas = holder.lockCanvas()
+                if (canvas != null) {
+                    try {
+                        // Always draw background
+                        canvas.drawColor(Color.BLACK)
 
-                if (currentFrameBitmap != null) {
-                    val canvas = holder.lockCanvas()
-                    if (canvas != null) {
-                        try {
-                            canvas.drawColor(Color.BLACK)
+                        backgroundBitmap?.let {
+                            val bgRect = Rect(0, 0, width, height)
+                            canvas.drawBitmap(it, null, bgRect, paint)
+                        }
 
-                            backgroundBitmap?.let {
-                                val bgRect = Rect(0, 0, width, height)
-                                canvas.drawBitmap(it, null, bgRect, paint)
-                            }
-
+                        // Draw emulator frame if available
+                        currentFrameBitmap?.let {
                             val shellScreenWidth = 235
                             val shellScreenHeight = 155
                             val shellScreenTop = 128
@@ -186,45 +119,46 @@ class WalkerView(context: Context) : SurfaceView(context), SurfaceHolder.Callbac
                                 shellScreenTop + shellScreenHeight
                             )
 
-                            val opaqueBitmap = currentFrameBitmap.copy(Bitmap.Config.ARGB_8888, true)
+                            val opaqueBitmap = it.copy(Bitmap.Config.ARGB_8888, true)
                             val canvasTemp = Canvas(opaqueBitmap)
                             canvasTemp.drawColor(Color.BLACK)
-                            canvasTemp.drawBitmap(currentFrameBitmap, 0f, 0f, null)
+                            canvasTemp.drawBitmap(it, 0f, 0f, null)
 
                             canvas.drawBitmap(opaqueBitmap, null, dstRect, paint)
-
-                            val buttonAreaTop = shellScreenTop + shellScreenHeight + 60f
-                            val buttonRadius = width / 12f
-                            val spacing = width / 4f
-
-                            for ((i, button) in buttons.withIndex()) {
-                                button.centerX = (width / 2f - spacing) + spacing * i
-                                button.centerY = buttonAreaTop
-                                button.radius = buttonRadius
-
-                                canvas.drawCircle(button.centerX, button.centerY, button.radius, buttonPaint)
-                                canvas.drawText(
-                                    button.label,
-                                    button.centerX,
-                                    button.centerY + (textPaint.textSize / 3),
-                                    textPaint
-                                )
-                            }
-                        } finally {
-                            holder.unlockCanvasAndPost(canvas)
                         }
+
+                        // Always draw buttons
+                        val shellScreenTop = 128
+                        val shellScreenHeight = 155
+                        val buttonAreaTop = shellScreenTop + shellScreenHeight + 60f
+                        val buttonRadius = width / 12f
+                        val spacing = width / 4f
+
+                        for ((i, button) in buttons.withIndex()) {
+                            button.centerX = (width / 2f - spacing) + spacing * i
+                            button.centerY = buttonAreaTop
+                            button.radius = buttonRadius
+
+                            canvas.drawCircle(button.centerX, button.centerY, button.radius, buttonPaint)
+                            canvas.drawText(
+                                button.label,
+                                button.centerX,
+                                button.centerY + (textPaint.textSize / 3),
+                                textPaint
+                            )
+                        }
+
+                    } catch (e: Exception) {
+                        Log.e("WalkerView", "Canvas draw error", e)
+                    } finally {
+                        holder.unlockCanvasAndPost(canvas)
                     }
                 }
 
                 val elapsed = System.currentTimeMillis() - startTime
                 val sleepTime = tickIntervalMs - elapsed
                 if (sleepTime > 0) {
-                    try {
-                        Thread.sleep(sleepTime)
-                    } catch (e: InterruptedException) {
-                        running = false
-                        break
-                    }
+                    Thread.sleep(sleepTime)
                 }
             }
         }
@@ -251,9 +185,12 @@ class WalkerView(context: Context) : SurfaceView(context), SurfaceHolder.Callbac
     }
 
     fun start() {
-        if (!running && holder.surface.isValid) {
+        if (!running && holder.surface?.isValid == true) {
             running = true
             startGameLoop()
+        } else {
+            Log.w("WalkerView", "Surface is not valid yet")
         }
     }
+
 }
